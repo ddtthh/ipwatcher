@@ -1,0 +1,27 @@
+<configuration>
+
+	<appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+		<!-- encoders are assigned the type ch.qos.logback.classic.encoder.PatternLayoutEncoder 
+			by default -->
+		<encoder>
+			<pattern>%d{HH:mm:ss.SSS} [%-20thread] %-5level %-70(%logger{36}.%M:%line) - %msg%n
+			</pattern>
+		</encoder>
+	</appender>
+
+	<!--  Extra settings for various categories -->
+	<!--logger name="org.jupnp.protocol" level="TRACE" /-->
+	<!--logger name="org.jupnp.registry.Registry" level="TRACE" /-->
+	<!--logger name="org.jupnp.registry.LocalItems" level="TRACE" /-->
+	<!--logger name="org.jupnp.registry.RemoteItems" level="TRACE" /-->
+
+	<!--  Extra settings to see on-the-wire traffic -->
+	<!--logger name="org.jupnp.transport.spi.DatagramProcessor" level="TRACE" /-->
+	<!--logger name="org.jupnp.transport.spi.SOAPActionProcessor" level="TRACE" /-->
+
+	<!--  default root level -->
+	<root level="ERROR">
+		<appender-ref ref="STDOUT" />
+	</root>
+
+</configuration>
