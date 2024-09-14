@@ -22,16 +22,20 @@ import org.jupnp.registry.Registry
 import org.jupnp.util.SpecificationViolationReporter
 import cats.effect.std.Dispatcher
 import cats.effect.std.Queue
+import org.jupnp.model.meta.Service
+import scala.jdk.CollectionConverters.*
+import org.jupnp.model.types.ServiceType
 
 object UPNP:
-  def service[F[_]: Async]: Resource[F, UpnpService] = Resource(Async[F].blocking {
+  enum RegistryEvent:
+    case DeviceAdded(registry: Registry, device: Device[?, ?, ?])
+    case DeviceRemoved(registry: Registry, device: Device[?, ?, ?])
+
+  def upnpService[F[_]: Async]: Resource[F, UpnpService] = Resource(Async[F].blocking {
     val upnpService = UpnpServiceImpl(DefaultUpnpServiceConfiguration())
     upnpService.startup()
     (upnpService, Async[F].blocking(upnpService.shutdown()))
   })
-  enum RegistryEvent:
-    case DeviceAdded(registry: Registry, device: Device[?, ?, ?])
-    case DeviceRemoved(registry: Registry, device: Device[?, ?, ?])
 
   def shutdown[F[_]: Async](service: UpnpService): F[Unit] = Async[F].blocking(service.shutdown())
 
@@ -51,3 +55,19 @@ object UPNP:
             ((), Async[F].delay(service.getRegistry().removeListener(listener)))
           )
         ) >> Stream.fromQueueNoneTerminated(queue)
+
+  def execute[F[_]: Async](upnpService: UpnpService, service: Service[?, ?], name: String, arguments: Map[String, Any]): F[Map[String, Any]] =
+    Async[F].async_ : callback =>
+      val invocation = ActionInvocation(service.getAction("GetExternalIPAddress"))
+      for (key, value) <- arguments do
+        invocation.setInput(key, value)
+      upnpService.getControlPoint().execute(new ActionCallback(invocation) {
+        def success(invocation: ActionInvocation[?]): Unit =
+          callback(Right(invocation.getOutputMap().asScala.map((k, v) => (k, v.getValue())).toMap))
+
+        def failure(invocation: ActionInvocation[?], operation: UpnpResponse, defaultMsg: String): Unit =
+          callback(Left(Error(defaultMsg)))
+      })
+
+  def findService(device: Device[?, ?, ?], tpe: ServiceType): Option[Service[?, ?]] =
+    Option(device.findService(tpe))

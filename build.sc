@@ -15,7 +15,9 @@ object ipwatcher extends RootModule with ScalaModule {
     ivy"javax.servlet:javax.servlet-api:4.0.1",
     ivy"org.eclipse.jetty:jetty-client:9.4.53.v20231009",
     ivy"org.eclipse.jetty:jetty-server:9.4.53.v20231009",
-    ivy"org.eclipse.jetty:jetty-servlet:9.4.53.v20231009"
+    ivy"org.eclipse.jetty:jetty-servlet:9.4.53.v20231009",
+    ivy"org.typelevel::log4cats-core:2.7.0",
+    ivy"org.typelevel::log4cats-slf4j:2.7.0"
   )
 
   override def scalacOptions = Seq("-deprecation", "-feature", "-new-syntax", "-unchecked", "-Xkind-projector:underscores")

@@ -9,6 +9,8 @@
 		</encoder>
 	</appender>
 
+	<logger name="ipwatcher" level="INFO" />
+
 	<!--  Extra settings for various categories -->
 	<!--logger name="org.jupnp.protocol" level="TRACE" /-->
 	<!--logger name="org.jupnp.registry.Registry" level="TRACE" /-->
