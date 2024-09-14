@@ -41,17 +41,24 @@ object Main extends CommandIOApp(
   val wanIpConnectionServiceType = UDAServiceType("WANIPConnection")
   def main: Opts[IO[ExitCode]] = flag.map: options =>
     Slf4jLogger.fromName[IO]("ipwatcher").flatMap: logger =>
-      IO.println(s"quiet: $options") >> UPNP.upnpService[IO].use: service =>
-        UPNP.events[IO](service).evalTap:
-          case RegistryEvent.DeviceAdded(registry, device) =>
-            UPNP.findService(device, wanIpConnectionServiceType) match
-              case Some(wanIpConnectionService) =>
-                UPNP.execute[IO](service, wanIpConnectionService, "GetExternalIPAddress", Map()).flatMap: result =>
-                  val value = result("NewExternalIPAddress")
-                  logger.info(s"${device.getIdentity().getUdn()} ${device.getDisplayString()} ${wanIpConnectionService.getServiceType()} ExternalIP: $value")
-              case None => IO.unit
-          case RegistryEvent.DeviceRemoved(registry, device) => IO.unit
-        .compile.drain.background.use_ >> IO.sleep(Duration(5, "s")).as(ExitCode.Success).onCancel(logger.info("canceled"))
+      IO.println(s"quiet: $options")
+      >> IP.listIP6Addresses[IO]().flatMap: ips =>
+        IO.println(s"$ips")
+      >> IP.watchIP6Addresses[IO]().evalTap: ips =>
+        IO.println(s"updated $ips")
+      .compile.drain.background.use: _ =>
+        UPNP.upnpService[IO].use: service =>
+          UPNP.events[IO](service).evalTap:
+            case RegistryEvent.DeviceAdded(registry, device) =>
+              UPNP.findService(device, wanIpConnectionServiceType) match
+                case Some(wanIpConnectionService) =>
+                  UPNP.execute[IO](service, wanIpConnectionService, "GetExternalIPAddress", Map()).flatMap: result =>
+                    val value = result("NewExternalIPAddress")
+                    logger.info(s"${device.getIdentity().getUdn()} ${device.getDisplayString()} ${wanIpConnectionService.getServiceType()} ExternalIP: $value")
+                case None => IO.unit
+            case RegistryEvent.DeviceRemoved(registry, device) => IO.unit
+          .compile.drain.background.use: _ =>
+            IO.sleep(Duration(10, "s")).as(ExitCode.Success).onCancel(logger.info("canceled"))
   end main
 
 end Main
