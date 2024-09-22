@@ -56,15 +56,17 @@ object Main extends CommandIOApp(
 
   final case class DyndnsService(
       authorization: Option[(String, String)],
-      uri: URI
+      uri: URI,
+      group: Option[String]
   )
 
   val authorizationUser = Opts.option[String]("user", help = "HTTP basic authorization user.")
   val authorizationPassword = Opts.option[String]("password", help = "HTTP basic authorization password.")
   val authorization = (authorizationUser, authorizationPassword).mapN(_ -> _).orNone
   val dyndnsUri = Opts.option[URI]("uri", help = "dyndns service uri, placeholders: $(IP4), $(IP6)")
+  val dyndnsGroup = Opts.option[String]("group", help = "group of services to call sequencially.").orNone
 
-  val dyndnsServices = (authorization, dyndnsUri).mapN(DyndnsService.apply)
+  val dyndnsServices = (authorization, dyndnsUri, dyndnsGroup).mapN(DyndnsService.apply)
   val dyndnsCommand = Command("<dyndns> :=", "dyndns service configuration.", false)(dyndnsServices)
 
   final case class Config(
@@ -91,6 +93,7 @@ object Main extends CommandIOApp(
   val wanIpConnectionServiceType = UDAServiceType("WANIPConnection", 2)
 
   def watch[F[_]: Async: Logger: Processes](config: Config): F[Unit] =
+    val dyndnsServiceGroups = config.dyndnsServices.toList.zipWithIndex.groupBy(x => x._1.group.getOrElse(x)).values.toList
     HttpClientFs2Backend.resource[F]().use: backend =>
       UPNP.upnpService[F].use: upnpService =>
         UPNP.watchServices[F](upnpService, wanIpConnectionServiceType).use: services =>
@@ -112,32 +115,34 @@ object Main extends CommandIOApp(
                     case Some((ip6, ip4)) =>
                       Logger[F].info(s"ip6: $ip6, ip4: $ip4")
                         >> Async[F].start:
-                          Stream.emits(config.dyndnsServices.toList.zipWithIndex).evalMap: (dyndnsService, index) =>
-                            previousIps(index).get.flatMap: previousIp =>
-                              if previousIp.contains((ip6, ip4)) then
-                                Async[F].unit
-                              else
-                                val user = dyndnsService.authorization.map(x => " " + x._1).getOrElse("") 
-                                val partialRequest = dyndnsService.authorization.map: (user, password) =>
-                                  basicRequest.auth.basic(user, password)
-                                .getOrElse(basicRequest)
-                                val uri = Uri.unsafeParse(dyndnsService.uri.toString().replace("(IP4)", ip4).replace("(IP6)", ip6))
-                                val request = partialRequest.get(uri)
-                                def doSend: F[Unit] = request.send(backend).flatMap: response =>
-                                  if response.isSuccess then
-                                    Async[F].uncancelable: _ =>
-                                      previousIps(index).set(Some((ip6, ip4)))
-                                        >> Logger[F].info(s"update succeeded for$user $ip6, $ip4: $uri")
-                                  else
-                                    Logger[F].error(s"update failed for$user $ip6, $ip4: $uri")
+                          Stream.emits(dyndnsServiceGroups).parEvalMapUnbounded: dyndnsServices =>
+                            Stream.emits(dyndnsServices).evalMap: (dyndnsService, index) =>
+                              previousIps(index).get.flatMap: previousIp =>
+                                if previousIp.contains((ip6, ip4)) then
+                                  Async[F].unit
+                                else
+                                  val user = dyndnsService.authorization.map(x => " " + x._1).getOrElse("")
+                                  val partialRequest = dyndnsService.authorization.map: (user, password) =>
+                                    basicRequest.auth.basic(user, password)
+                                  .getOrElse(basicRequest)
+                                  val uri = Uri.unsafeParse(dyndnsService.uri.toString().replace("(IP4)", ip4).replace("(IP6)", ip6))
+                                  val request = partialRequest.get(uri)
+                                  def doSend: F[Unit] = request.send(backend).flatMap: response =>
+                                    if response.isSuccess then
+                                      Async[F].uncancelable: _ =>
+                                        previousIps(index).set(Some((ip6, ip4)))
+                                          >> Logger[F].info(s"update succeeded for$user $ip6, $ip4: $uri")
+                                    else
+                                      Logger[F].error(s"update failed for$user $ip6, $ip4: $uri")
+                                        >> Async[F].sleep(FiniteDuration(10, "s"))
+                                        >> doSend
+                                  .handleErrorWith(e =>
+                                    Logger[F].error(e)(s"update failed with exception for$user $ip6, $ip4: $uri")
                                       >> Async[F].sleep(FiniteDuration(10, "s"))
                                       >> doSend
-                                .handleErrorWith(e =>
-                                  Logger[F].error(e)(s"update failed with exception for$user $ip6, $ip4: $uri")
-                                    >> Async[F].sleep(FiniteDuration(10, "s"))
-                                    >> doSend
-                                )
-                                doSend.onCancel(Logger[F].info(s"update canceled for$user $ip6, $ip4: $uri"))
+                                  )
+                                  doSend.onCancel(Logger[F].info(s"update canceled for$user $ip6, $ip4: $uri"))
+                            .compile.drain
                           .compile.drain
                         .map(_.cancel)
                   )
