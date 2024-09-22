@@ -14,14 +14,13 @@ import java.time.LocalDateTime
 import fs2.Pull.Timed
 import scala.concurrent.duration.FiniteDuration
 import scala.concurrent.duration.Duration
-import scala.collection.immutable.SortedMap
 
 object IP:
 
   given Eq[LocalDateTime] = Eq.fromUniversalEquals
 
-  val ipRegEx = raw"(\d+): (\S+) +inet6 ([0-9a-f:/]+) scope (\S+) ((?:\S+ )*)\\ +valid_lft (\S+) preferred_lft (\S+)".r
-  val ipMonitorRegEx1 = raw"\[(\S+)\] (Deleted )?(\d+): (\S+) +inet6 ([0-9a-f:/]+) scope (\S+) ((?:\S+ )*)".r
+  val ipRegEx = raw"(\d+): (\S+) +inet6 ([0-9a-f:]+)/64 scope (\S+) ((?:\S+ )*)\\ +valid_lft (\S+) preferred_lft (\S+)".r
+  val ipMonitorRegEx1 = raw"\[(\S+)\] (Deleted )?(\d+): (\S+) +inet6 ([0-9a-f:]+)/64 scope (\S+) ((?:\S+ )*)".r
   val ipMonitorRegEx2 = raw" +valid_lft (\S+) preferred_lft (\S+)".r
   val secRegEx = raw"(\d+)sec".r
 
