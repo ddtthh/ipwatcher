@@ -31,7 +31,7 @@ object IP:
       Duration(sec.toInt, "s")
 
   final case class IP6Address(id: Int, device: String, ip: String, scope: String, flags: List[String], validLft: Duration, preferredLft: Duration):
-    def isRelevant: Boolean = scope == "global" && !flags.contains("temporary") && !flags.contains("deprecated") && flags.contains("dynamic") && preferredLft > FiniteDuration(5, "min") && !ip.startsWith("fd0")
+    def isRelevant(minLiftime: FiniteDuration): Boolean = scope == "global" && !flags.contains("temporary") && !flags.contains("deprecated") && flags.contains("dynamic") && preferredLft >= minLiftime && !ip.startsWith("fd0")
 
   def listIP6Addresses[F[_]: Async: Processes](): F[List[IP6Address]] =
     ProcessBuilder("ip", "-6", "-o", "address").spawn[F].use: process =>
@@ -50,7 +50,7 @@ object IP:
         val timestamp = LocalDateTime.parse(ts)
         (timestamp, if deleted == null then Right(addr) else Left(addr))
 
-  def watchGlobalIP6Addresses[F[_]: Async: Processes](): Stream[F, Map[(String, String), LocalDateTime]] =
+  def watchGlobalIP6Addresses[F[_]: Async: Processes](minLiftime: FiniteDuration): Stream[F, Map[(String, String), LocalDateTime]] =
     watchIP6Addresses[F]().pull.timed: timed =>
       def await(input: Timed[F, (LocalDateTime, Either[IP6Address, IP6Address])]): Pull[F, Map[(String, String), LocalDateTime], Unit] =
         Pull.eval(listIP6Addresses[F]()).flatMap: ip6addresses =>
@@ -59,14 +59,14 @@ object IP:
             case Some((Right(_), tail)) => await(tail)
             case Some((Left(_), tail)) =>
               val time = LocalDateTime.now()
-              val map = ip6addresses.flatMap(ip => Option.when(ip.isRelevant)((ip.device, ip.ip) -> time)).toMap
+              val map = ip6addresses.flatMap(ip => Option.when(ip.isRelevant(minLiftime))((ip.device, ip.ip) -> time)).toMap
               Pull.output1(map) >> forward(tail, map)
       def forward(input: Timed[F, (LocalDateTime, Either[IP6Address, IP6Address])], map: Map[(String, String), LocalDateTime]): Pull[F, Map[(String, String), LocalDateTime], Unit] =
         input.uncons.flatMap:
           case None => Pull.done
           case Some((Right(events), tail)) =>
             val newMap = events.foldLeft(map):
-              case (map, (time, Right(ip))) if ip.isRelevant                   => map + ((ip.device, ip.ip) -> time)
+              case (map, (time, Right(ip))) if ip.isRelevant(minLiftime)       => map + ((ip.device, ip.ip) -> time)
               case (map, (time, Right(ip))) if ip.flags.contains("deprecated") => map - (ip.device -> ip.ip)
               case (map, (_, Left(ip)))                                        => map - (ip.device -> ip.ip)
               case _                                                           => map
@@ -75,8 +75,8 @@ object IP:
       await(timed)
     .stream.changes
 
-  def watchLatestGlobalIP6Addresses[F[_]: Async: Processes](): Stream[F, Map[String, String]] =
-    watchGlobalIP6Addresses[F]().map: ips =>
+  def watchLatestGlobalIP6Addresses[F[_]: Async: Processes](minLiftime: FiniteDuration): Stream[F, Map[String, String]] =
+    watchGlobalIP6Addresses[F](minLiftime).map: ips =>
       ips.groupMapReduce(_._1._1)(entry => entry._2 -> entry._1._2)((a, b) => if a._1.isBefore(b._1) then b else a).view.mapValues(_._2).toMap
     .changes
 
