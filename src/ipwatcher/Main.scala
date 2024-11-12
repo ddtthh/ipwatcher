@@ -79,6 +79,7 @@ object Main extends CommandIOApp(
       delay: FiniteDuration,
       retry: FiniteDuration,
       restart: FiniteDuration,
+      fail: FiniteDuration,
       dyndnsServices: NonEmptyList[DyndnsService]
   )
 
@@ -94,13 +95,14 @@ object Main extends CommandIOApp(
   val delay = Opts.option[FiniteDuration]("delay", help = "delay updates, default 5 s.").withDefault(FiniteDuration(5, "s"))
   val retry = Opts.option[FiniteDuration]("retry", help = "retry failed update after, default 10 s.").withDefault(FiniteDuration(10, "s"))
   val restart = Opts.option[FiniteDuration]("restart", help = "restart after failure, default 10 s.").withDefault(FiniteDuration(10, "s"))
+  val fail = Opts.option[FiniteDuration]("fail", help = "fail when no ips are detected for that ammount of time, default 30 s.").withDefault(FiniteDuration(30, "s"))
   val dyndns = Opts.options[String]("dyndns", metavar = "dyndns ", help = dyndnsCommand.showHelp).mapValidated: values =>
     values.traverse: value =>
       dyndnsCommand.parse(Util.splitArgs(value)) match
         case Right(config) => Validated.valid(config)
         case Left(help)    => Validated.invalidNel(s"Illegal dyndns service configuration:\n${help.toString.indent(4)}")
 
-  val configOpts = (ip6lifetime, ip6interfaces, upnpSearchFor, debounce, delay, retry, restart, dyndns).mapN(Config.apply)
+  val configOpts = (ip6lifetime, ip6interfaces, upnpSearchFor, debounce, delay, retry, restart, fail, dyndns).mapN(Config.apply)
 
   val wanIpConnectionServiceType = UDAServiceType("WANIPConnection", 2)
 
@@ -115,15 +117,19 @@ object Main extends CommandIOApp(
           val (udn, (device, wanIpConnectionService)) = services.headOption.getOrElse(throw Exception("No home router found via UPNP."))
           Logger[F].info(s"device found: $udn ${device.getDisplayString()} ${device.getDetails().getPresentationURI()}")
             >> IP.watchLatestGlobalIP6Addresses[F](config.ip6lifetime).evalMap: ip6s =>
-              config.ip6interfaces.toList.view.flatMap(iface => ip6s.view.filterKeys(iface.matches).values).headOption.flatTraverse: ip6 =>
-                UPNP.execute[F](upnpService, wanIpConnectionService, "GetExternalIPAddress", Map()).map: result =>
-                  result.get("NewExternalIPAddress").map(ip4 => ip6 -> ip4.asInstanceOf[String])
+              Logger[F].info(s"Discovered ip6 addresses: ${ip6s.map((k, v) => s"$k: $v").mkString(", ")}") >> config.ip6interfaces.toList.view.flatMap(iface => ip6s.view.filterKeys(iface.matches).values).headOption.flatTraverse: ip6 =>
+                UPNP.execute[F](upnpService, wanIpConnectionService, "GetExternalIPAddress", Map()).flatMap: result =>
+                  val ip4s = result.get("NewExternalIPAddress").map(_.asInstanceOf[String])
+                  Logger[F].info(s"Discovered ip4 addresses: ${ip4s.getOrElse("")}").as(
+                    ip4s.map(ip4 => ip6 -> ip4)
+                  )
             .changes.hold1Resource.use: ips =>
               MapRef.inConcurrentHashMap[F, F, Int, (String, String)]().flatMap: previousIps =>
                 ips.discrete.evalScan(Async[F].unit): (cancel, ips) =>
                   cancel >> (ips match
                     case (None) =>
-                      Logger[F].info(s"no ips").as(Async[F].unit)
+                      Logger[F].info(s"no ips") >>
+                        (Async[F].sleep(config.fail) >> Async[F].raiseError(new Error(s"no ips detected for ${config.fail}."))).start.map(_.cancel)
                     case Some((ip6, ip4)) =>
                       Logger[F].info(s"ip6: $ip6, ip4: $ip4")
                         >> Ref.of(Instant.MIN).flatMap: terminatedAt =>
