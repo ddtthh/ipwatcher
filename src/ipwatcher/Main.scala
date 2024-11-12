@@ -95,7 +95,7 @@ object Main extends CommandIOApp(
   val delay = Opts.option[FiniteDuration]("delay", help = "delay updates, default 5 s.").withDefault(FiniteDuration(5, "s"))
   val retry = Opts.option[FiniteDuration]("retry", help = "retry failed update after, default 10 s.").withDefault(FiniteDuration(10, "s"))
   val restart = Opts.option[FiniteDuration]("restart", help = "restart after failure, default 10 s.").withDefault(FiniteDuration(10, "s"))
-  val fail = Opts.option[FiniteDuration]("fail", help = "fail when no ips are detected for that ammount of time, default 30 s.").withDefault(FiniteDuration(30, "s"))
+  val fail = Opts.option[FiniteDuration]("fail", help = "fail when no ips are detected for that ammount of time, default 30 s.").withDefault(FiniteDuration(10, "min"))
   val dyndns = Opts.options[String]("dyndns", metavar = "dyndns ", help = dyndnsCommand.showHelp).mapValidated: values =>
     values.traverse: value =>
       dyndnsCommand.parse(Util.splitArgs(value)) match
