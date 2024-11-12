@@ -121,7 +121,7 @@ object Main extends CommandIOApp(
                 UPNP.execute[F](upnpService, wanIpConnectionService, "GetExternalIPAddress", Map()).flatMap: result =>
                   val ip4s = result.get("NewExternalIPAddress").map(_.asInstanceOf[String])
                   Logger[F].info(s"Discovered ip4 addresses: ${ip4s.getOrElse("")}").as(
-                    ip4s.map(ip4 => ip6 -> ip4)
+                    ip4s.map(ip6 -> _)
                   )
             .changes.hold1Resource.use: ips =>
               MapRef.inConcurrentHashMap[F, F, Int, (String, String)]().flatMap: previousIps =>
