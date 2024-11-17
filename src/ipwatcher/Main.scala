@@ -106,6 +106,7 @@ object Main extends CommandIOApp(
 
   val wanIpConnectionServiceType = UDAServiceType("WANIPConnection", 2)
 
+  // TODO: improve handling of ip4 upnp requests. Should not block setting ipv6 addresses, should be retried when request fails.
   def watch[F[_]: Async: Logger: Processes](config: Config): F[Unit] =
     val dyndnsServiceGroups = config.dyndnsServices.toList.zipWithIndex.groupBy(x => x._1.group.getOrElse(x)).values.toList
     HttpClientFs2Backend.resource[F]().use: backend =>
@@ -117,19 +118,19 @@ object Main extends CommandIOApp(
           val (udn, (device, wanIpConnectionService)) = services.headOption.getOrElse(throw Exception("No home router found via UPNP."))
           Logger[F].info(s"device found: $udn ${device.getDisplayString()} ${device.getDetails().getPresentationURI()}")
             >> IP.watchLatestGlobalIP6Addresses[F](config.ip6lifetime).evalMap: ip6s =>
-              Logger[F].info(s"Discovered ip6 addresses: ${ip6s.map((k, v) => s"$k: $v").mkString(", ")}") >> config.ip6interfaces.toList.view.flatMap(iface => ip6s.view.filterKeys(iface.matches).values).headOption.flatTraverse: ip6 =>
-                UPNP.execute[F](upnpService, wanIpConnectionService, "GetExternalIPAddress", Map()).flatMap: result =>
-                  val ip4s = result.get("NewExternalIPAddress").map(_.asInstanceOf[String])
-                  Logger[F].info(s"Discovered ip4 addresses: ${ip4s.getOrElse("")}").as(
-                    ip4s.map(ip6 -> _)
-                  )
+              Logger[F].info(s"Discovered ip6 addresses: ${ip6s.map((k, v) => s"$k: $v").mkString(", ")}") >> config.ip6interfaces.toList.view.flatMap(iface => ip6s.view.filterKeys(iface.matches).values).headOption.traverse: ip6 =>
+                Async[F].sleep(FiniteDuration(3, "s")) // hack to reduce likelyness of ip not being available
+                  >> UPNP.execute[F](upnpService, wanIpConnectionService, "GetExternalIPAddress", Map()).flatMap: result =>
+                    val ip4 = result.get("NewExternalIPAddress").getOrElse(throw new Exception("Empty reply for upnp request for ip4 address.")).asInstanceOf[String]
+                    Logger[F].info(s"Discovered ip4 addresses: $ip4").as(
+                      ip6 -> ip4
+                    )
             .changes.hold1Resource.use: ips =>
               MapRef.inConcurrentHashMap[F, F, Int, (String, String)]().flatMap: previousIps =>
                 ips.discrete.evalScan(Async[F].unit): (cancel, ips) =>
                   cancel >> (ips match
                     case (None) =>
-                      Logger[F].info(s"no ips") >>
-                        (Async[F].sleep(config.fail) >> Async[F].raiseError(new Error(s"no ips detected for ${config.fail}."))).start.map(_.cancel)
+                      Logger[F].info(s"no ips").as(Async[F].unit)
                     case Some((ip6, ip4)) =>
                       Logger[F].info(s"ip6: $ip6, ip4: $ip4")
                         >> Ref.of(Instant.MIN).flatMap: terminatedAt =>
