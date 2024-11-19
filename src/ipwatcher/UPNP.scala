@@ -74,8 +74,10 @@ object UPNP:
           callback(Right(invocation.getOutputMap().asScala.flatMap((k, v) => Option(v.getValue()).map(k -> _)).toMap))
 
         def failure(invocation: ActionInvocation[?], operation: UpnpResponse, defaultMsg: String): Unit =
-          callback(Left(Error(defaultMsg)))
+          callback(Left(UPNPException(defaultMsg)))
       })
+
+  final case class UPNPException(msg: String) extends Exception(msg)
 
   def findService(device: Device[?, ?, ?], tpe: ServiceType): Option[Service[?, ?]] =
     Option(device.findService(tpe))

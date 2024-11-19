@@ -3,6 +3,13 @@ package ipwatcher
 import scala.annotation.tailrec
 import scala.collection.mutable.ListBuffer
 
+import cats.*
+import cats.implicits.*
+import cats.effect.*
+import cats.effect.implicits.*
+import fs2.*
+import cats.effect.std.Queue
+
 object Util:
   def splitArgs(s: String): List[String] =
     @tailrec
@@ -48,3 +55,22 @@ object Util:
             args += value.toString()
             args.toList
     rec(0, ListBuffer(), None)
+
+  extension [F[_], O](self: Stream[F, O])
+    def evalMapCancel[F2[x] >: F[x]: Async, O2](f: O => F2[O2]): Stream[F2, O2] =
+      self.flatMapCancel(o => Stream.eval(f(o)))
+    def flatMapCancel[F2[x] >: F[x]: Async, O2](f: O => Stream[F2, O2]): Stream[F2, O2] =
+      Stream.eval((Queue.bounded[F2, Option[Either[Throwable, O2]]](1), Ref.of[F2, Option[Fiber[F2, Throwable, Unit]]](None)).tupled).flatMap: (outputs, fiber) =>
+        Stream.fromQueueNoneTerminated(outputs).rethrow.concurrently:
+          self.foreach: input =>
+            val evaluator = f(input).attempt.foreach: output =>
+              outputs.offer(Some(output))
+            .compile.drain
+            Async[F2].uncancelable: _ =>
+              fiber.getAndSet(None).flatMap(_.traverse(_.cancel))
+                >> evaluator.start.flatMap: newFiber =>
+                  fiber.set(Some(newFiber))
+          .onComplete(Stream.eval(fiber.getAndSet(None).flatMap(_.traverse(_.join).void) >> outputs.offer(None)))
+            .onFinalize:
+              Async[F2].uncancelable: _ =>
+                fiber.get.flatMap(_.traverse(_.cancel).void)

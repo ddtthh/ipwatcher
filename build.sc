@@ -23,4 +23,11 @@ object ipwatcher extends RootModule with ScalaModule {
 
   override def scalacOptions = Seq("-deprecation", "-feature", "-new-syntax", "-unchecked", "-Xkind-projector:underscores")
 
+  object test extends ScalaTests with TestModule.ScalaTest {
+    def ivyDeps = Agg(
+      ivy"org.scalatest::scalatest:3.2.19",
+      ivy"org.typelevel::cats-effect-testing-scalatest:1.5.0",
+      ivy"org.typelevel::cats-effect-testkit:3.5.5"
+    )
+  }
 }
