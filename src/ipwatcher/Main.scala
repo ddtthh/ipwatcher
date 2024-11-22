@@ -67,7 +67,7 @@ object Main extends CommandIOApp(
       uris: Ior[URI, URI], // left ip6 only, right ip6 and ip4
       group: Option[String]
   ):
-    def info: String = s"uri: ${uris.toEither.getOrLeft}, user: ${authorization.getOrElse("n/a")}"
+    def info: String = s"uri: ${uris.toEither.getOrLeft}, user: ${authorization.map(_._1).getOrElse("n/a")}"
 
   val authorizationUser = Opts.option[String]("user", help = "HTTP basic authorization user.")
   val authorizationPassword = Opts.option[String]("password", help = "HTTP basic authorization password.")
@@ -76,7 +76,7 @@ object Main extends CommandIOApp(
   val dyndnsUriIp6 = Opts.option[URI]("uriIp6", help = "dyndns service uri to set only ip6 when ip4 is unavailable, placeholders: $(IP6)").orNone
   val dyndnsGroup = Opts.option[String]("group", help = "group of services to call sequencially.").orNone
 
-  val dyndnsUris: Opts[Ior[URI, URI]] = (dyndnsUri, dyndnsUriIp6).mapN(Ior.fromOptions).mapValidated:
+  val dyndnsUris: Opts[Ior[URI, URI]] = (dyndnsUriIp6, dyndnsUri).mapN(Ior.fromOptions).mapValidated:
     case Some(uris) => Validated.valid(uris)
     case None       => Validated.invalidNel("at least one of --uri or --uriIp6 is required.")
   val dyndnsServices = (authorization, dyndnsUris, dyndnsGroup).mapN(DyndnsService.apply)
