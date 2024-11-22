@@ -50,9 +50,11 @@ import sttp.client4.*
 import sttp.model.Uri
 import java.time.Instant
 import scala.jdk.javaapi.DurationConverters
-import Util.{flatMapCancel, evalMapCancel}
+import Util.{flatMapCancel, evalMapCancel, getOrLeft}
 import fs2.concurrent.Signal
 import sttp.capabilities.fs2.Fs2Streams
+import cats.data.Ior
+import cats.data.ValidatedNel
 
 object Main extends CommandIOApp(
       name = "ipwatcher",
@@ -62,20 +64,22 @@ object Main extends CommandIOApp(
 
   final case class DyndnsService(
       authorization: Option[(String, String)],
-      uri: URI,
-      uriIp6: Option[URI],
+      uris: Ior[URI, URI], // left ip6 only, right ip6 and ip4
       group: Option[String]
   ):
-    def info: String = s"uri: $uri, user: ${authorization.getOrElse("n/a")}"
+    def info: String = s"uri: ${uris.toEither.getOrLeft}, user: ${authorization.getOrElse("n/a")}"
 
   val authorizationUser = Opts.option[String]("user", help = "HTTP basic authorization user.")
   val authorizationPassword = Opts.option[String]("password", help = "HTTP basic authorization password.")
   val authorization = (authorizationUser, authorizationPassword).mapN(_ -> _).orNone
-  val dyndnsUri = Opts.option[URI]("uri", help = "dyndns service uri, placeholders: $(IP4), $(IP6)")
+  val dyndnsUri = Opts.option[URI]("uri", help = "dyndns service uri, placeholders: $(IP4), $(IP6)").orNone
   val dyndnsUriIp6 = Opts.option[URI]("uriIp6", help = "dyndns service uri to set only ip6 when ip4 is unavailable, placeholders: $(IP6)").orNone
   val dyndnsGroup = Opts.option[String]("group", help = "group of services to call sequencially.").orNone
 
-  val dyndnsServices = (authorization, dyndnsUri, dyndnsUriIp6, dyndnsGroup).mapN(DyndnsService.apply)
+  val dyndnsUris: Opts[Ior[URI, URI]] = (dyndnsUri, dyndnsUriIp6).mapN(Ior.fromOptions).mapValidated:
+    case Some(uris) => Validated.valid(uris)
+    case None       => Validated.invalidNel("at least one of --uri or --uriIp6 is required.")
+  val dyndnsServices = (authorization, dyndnsUris, dyndnsGroup).mapN(DyndnsService.apply)
   val dyndnsCommand = Command("<dyndns> :=", "dyndns service configuration.", false)(dyndnsServices)
 
   final case class Config(
@@ -85,10 +89,14 @@ object Main extends CommandIOApp(
       debounce: FiniteDuration,
       delay: FiniteDuration,
       retryUpnp: FiniteDuration,
+      retryUpnpLimit: Int,
       retryUpdate: FiniteDuration,
+      retryUpdateLimit: Int,
       restart: FiniteDuration,
+      restartLimit: Int,
       dyndnsServices: NonEmptyList[DyndnsService]
-  )
+  ):
+    def isIp6Only: Boolean = dyndnsServices.forall(_.uris.isLeft)
 
   val ip6lifetime = Opts.option[FiniteDuration]("ip6lifetime", help = "minimal preferred lifetime for ip6 address, default 5 min.").withDefault(5.minutes)
   val ip6interfaces = Opts.options[String]("ip6interface", help = "network interfaces for ip6 address.").mapValidated: values =>
@@ -101,31 +109,36 @@ object Main extends CommandIOApp(
   val debounce = Opts.option[FiniteDuration]("debounce", help = "debounce updates, default 2 min.").withDefault(10.minutes)
   val delay = Opts.option[FiniteDuration]("delay", help = "delay updates, default 5 s.").withDefault(5.seconds)
   val retryUpnp = Opts.option[FiniteDuration]("retryUpnp", help = "retry failed upnp request after, default 10 s.").withDefault(10.seconds)
+  val retryUpnpLimit = Opts.option[Int]("retryUpnpLimit", help = "number of retries after failed upnp request, default 100.").withDefault(100)
   val retryUpdate = Opts.option[FiniteDuration]("retryUpdate", help = "retry failed update after, default 5 min.").withDefault(5.minutes)
+  val retryUpdateLimit = Opts.option[Int]("retryUpdateLimit", help = "number of retries after failed update, default 100.").withDefault(100)
   val restart = Opts.option[FiniteDuration]("restart", help = "restart after failure, default 30 s.").withDefault(30.seconds)
+  val restartLimit = Opts.option[Int]("restartLimit", help = "number of restarts, default 100.").withDefault(100)
   val dyndns = Opts.options[String]("dyndns", metavar = "dyndns ", help = dyndnsCommand.showHelp).mapValidated: values =>
     values.traverse: value =>
       dyndnsCommand.parse(Util.splitArgs(value)) match
         case Right(config) => Validated.valid(config)
         case Left(help)    => Validated.invalidNel(s"Illegal dyndns service configuration:\n${help.toString.indent(4)}")
 
-  val configOpts = (ip6lifetime, ip6interfaces, upnpSearchFor, debounce, delay, retryUpnp, retryUpdate, restart, dyndns).mapN(Config.apply)
+  val configOpts = (ip6lifetime, ip6interfaces, upnpSearchFor, debounce, delay, retryUpnp, retryUpnpLimit, retryUpdate, retryUpdateLimit, restart, restartLimit, dyndns).mapN(Config.apply)
 
   val wanIpConnectionServiceType = UDAServiceType("WANIPConnection", 2)
 
   def watch[F[_]: Async: Logger: Processes](config: Config): Stream[F, Option[(String, Option[String])]] =
-    val dyndnsServiceGroups = config.dyndnsServices.toList.zipWithIndex.groupBy(x => x._1.group.getOrElse(x)).values.toList
-    Stream.resource:
-      UPNP.upnpService[F].evalMap: upnpService =>
-        UPNP.watchServices[F](upnpService, wanIpConnectionServiceType).use: services =>
-          UPNP.search[F](upnpService) >> services.interruptAfter(config.upnpSearchFor).compile.last.map(_.getOrElse(Map())) // TODO: use first?
-        .flatMap: services =>
-          val (udn, (device, wanIpConnectionService)) = services.headOption.getOrElse(throw Exception("No home router found via UPNP."))
-          Logger[F].info(s"device found: $udn ${device.getDisplayString()} ${device.getDetails().getPresentationURI()}").as:
-            IP.watchLatestGlobalIP6Addresses[F](config.ip6lifetime).evalTap: ip6s =>
-              Logger[F].info(s"Discovered ip6 addresses: ${ip6s.map((k, v) => s"$k: $v").mkString(", ")}")
-            .flatMapCancel: ip6s =>
-              config.ip6interfaces.toList.view.flatMap(iface => ip6s.view.filterKeys(iface.matches).values).headOption match
+    if config.isIp6Only then
+      watchIp6(config).map(_.map(_ -> None))
+    else
+      val dyndnsServiceGroups = config.dyndnsServices.toList.zipWithIndex.groupBy(x => x._1.group.getOrElse(x)).values.toList
+      Stream.resource:
+        UPNP.upnpService[F].evalMap: upnpService =>
+          UPNP.watchServices[F](upnpService, wanIpConnectionServiceType).use: services =>
+            UPNP.search[F](upnpService) >> services.interruptAfter(config.upnpSearchFor).compile.last.map(_.getOrElse(Map()))
+          .flatMap: services =>
+            val (udn, (device, wanIpConnectionService)) = services.headOption.getOrElse(throw Exception("No home router found via UPNP."))
+            Logger[F].info(s"device found: $udn ${device.getDisplayString()} ${device.getDetails().getPresentationURI()}").as:
+              IP.watchLatestGlobalIP6Addresses[F](config.ip6lifetime).evalTap: ip6s =>
+                Logger[F].info(s"Discovered ip6 addresses: ${ip6s.map((k, v) => s"$k: $v").mkString(", ")}")
+              watchIp6(config).flatMapCancel:
                 case None => Stream(Option.empty[(String, Option[String])])
                 case Some(ip6) => Stream(Some(ip6 -> Option.empty[String])) ++
                     Stream.retry(
@@ -140,10 +153,17 @@ object Main extends CommandIOApp(
                       ,
                       config.retryUpnp,
                       identity,
-                      Integer.MAX_VALUE
+                      config.retryUpdateLimit
                     )
-    .flatten.changes
+      .flatten.changes
   end watch
+
+  def watchIp6[F[_]: Async: Logger: Processes](config: Config): Stream[F, Option[String]] =
+    IP.watchLatestGlobalIP6Addresses[F](config.ip6lifetime).evalTap: ip6s =>
+      Logger[F].info(s"Discovered ip6 addresses: ${ip6s.map((k, v) => s"$k: $v").mkString(", ")}")
+    .map: ip6s =>
+      config.ip6interfaces.toList.view.flatMap(iface => ip6s.view.filterKeys(iface.matches).values).headOption
+  end watchIp6
 
   def scheduleUpdates[F[_]: Async: Logger: Processes](config: Config, ips: Stream[F, Option[(String, Option[String])]]): F[Unit] =
     val dyndnsServiceGroups = config.dyndnsServices.toList.zipWithIndex.groupBy(x => x._1.group.getOrElse(x)).values.toList
@@ -181,25 +201,30 @@ object Main extends CommandIOApp(
     val partialRequest = dyndnsService.authorization.map: (user, password) =>
       basicRequest.auth.basic(user, password)
     .getOrElse(basicRequest)
-    val doSend = ip4 match
-      case None =>
-        dyndnsService.uriIp6 match
-          case None =>
-            Logger[F].warn(s"update ignored as no ip4 is available for ${dyndnsService.info} with ip6: $ip6")
-          case Some(uriIp6) =>
-            val uri = Uri.unsafeParse(dyndnsService.uri.toString().replace("(IP6)", ip6))
-            val request = partialRequest.get(uri)
-            request.send(backend).flatMap: response =>
-              response.body match
-                case Right(_)  => Logger[F].info(s"update for ip6 succeeded for ${dyndnsService.info} with ip6: $ip6")
-                case Left(msg) => Async[F].raiseError(ApplicationException(s"Request failed for uri $uri with $msg"))
-      case Some(ip4) =>
-        val uri = Uri.unsafeParse(dyndnsService.uri.toString().replace("(IP4)", ip4).replace("(IP6)", ip6))
-        val request = partialRequest.get(uri)
-        request.send(backend).flatMap: response =>
-          response.body match
-            case Right(_)  => Logger[F].info(s"update succeeded for ${dyndnsService.info} with ip6: $ip6, ip4: $ip4")
-            case Left(msg) => Async[F].raiseError(ApplicationException(s"Request failed for uri $uri with $msg"))
+    def doIp6Only(uriIp6Only: URI) =
+      val uri = Uri.unsafeParse(uriIp6Only.toString().replace("(IP6)", ip6))
+      val request = partialRequest.get(uri)
+      request.send(backend).flatMap: response =>
+        response.body match
+          case Right(_)  => Logger[F].info(s"update for ip6 succeeded for ${dyndnsService.info} with ip6: $ip6")
+          case Left(msg) => Async[F].raiseError(ApplicationException(s"Request failed for uri $uri with $msg"))
+    def doBoth(uriBoth: URI, ip4: String) =
+      val uri = Uri.unsafeParse(uriBoth.toString().replace("(IP4)", ip4).replace("(IP6)", ip6))
+      val request = partialRequest.get(uri)
+      request.send(backend).flatMap: response =>
+        response.body match
+          case Right(_)  => Logger[F].info(s"update succeeded for ${dyndnsService.info} with ip6: $ip6, ip4: $ip4")
+          case Left(msg) => Async[F].raiseError(ApplicationException(s"Request failed for uri $uri with $msg"))
+    val doSend = dyndnsService.uris match
+      case Ior.Right(uriBoth) =>
+        ip4 match
+          case None      => Logger[F].warn(s"update ignored as no ip4 is available for ${dyndnsService.info} with ip6: $ip6")
+          case Some(ip4) => doBoth(uriBoth, ip6)
+      case Ior.Left(uriIp6only) => doIp6Only(uriIp6only)
+      case Ior.Both(uriIp6only, uriBoth) =>
+        ip4 match
+          case None      => doIp6Only(uriIp6only)
+          case Some(ip4) => doBoth(uriBoth, ip6)
     Stream.retry(
       doSend.onError:
         case ApplicationException(msg) =>
@@ -211,7 +236,7 @@ object Main extends CommandIOApp(
       ,
       config.retryUpdate,
       identity,
-      Int.MaxValue,
+      config.retryUpdateLimit,
       e => e.isInstanceOf[ApplicationException] || e.isInstanceOf[SttpClientException]
     ).compile.drain
   end update
@@ -226,7 +251,7 @@ object Main extends CommandIOApp(
           doUpdates,
           config.restart,
           identity,
-          Int.MaxValue
+          config.restartLimit
         ).compile.drain.as(ExitCode.Success)
   end main
 

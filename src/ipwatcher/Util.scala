@@ -74,3 +74,8 @@ object Util:
             .onFinalize:
               Async[F2].uncancelable: _ =>
                 fiber.get.flatMap(_.traverse(_.cancel).void)
+
+  extension [A, B](self: Either[A, B])
+    def getOrLeft: A | B = self match
+      case Left(a)  => a
+      case Right(b) => b
