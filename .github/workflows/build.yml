@@ -21,7 +21,6 @@ jobs:
       with:
         java-version: '17'
         distribution: 'temurin'
-        cache: 'sbt'
     - name: Set up mill
       uses: jodersky/setup-mill@master
       with:
