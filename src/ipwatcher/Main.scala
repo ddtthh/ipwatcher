@@ -59,7 +59,7 @@ import cats.data.ValidatedNel
 object Main extends CommandIOApp(
       name = "ipwatcher",
       header = "watches public ip address changes.",
-      version = "0.0.1"
+      version = "0.1.0"
     ):
 
   final case class DyndnsService(
