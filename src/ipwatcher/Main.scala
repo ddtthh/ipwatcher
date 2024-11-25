@@ -219,12 +219,12 @@ object Main extends CommandIOApp(
       case Ior.Right(uriBoth) =>
         ip4 match
           case None      => Logger[F].warn(s"update ignored as no ip4 is available for ${dyndnsService.info} with ip6: $ip6")
-          case Some(ip4) => doBoth(uriBoth, ip6)
+          case Some(ip4) => doBoth(uriBoth, ip4)
       case Ior.Left(uriIp6only) => doIp6Only(uriIp6only)
       case Ior.Both(uriIp6only, uriBoth) =>
         ip4 match
           case None      => doIp6Only(uriIp6only)
-          case Some(ip4) => doBoth(uriBoth, ip6)
+          case Some(ip4) => doBoth(uriBoth, ip4)
     Stream.retry(
       doSend.onError:
         case ApplicationException(msg) =>
