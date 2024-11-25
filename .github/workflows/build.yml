@@ -31,8 +31,10 @@ jobs:
       run: mill test
     - name: Assembly
       run: mill assembly
+    - name: Rename Artifact
+      run: mv out/assembly.dest/out.jar out/ipwatcher.jar
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
         name: assembly
-        path: out/assembly.dest/out.jar
+        path: out/ipwatcher.jar
