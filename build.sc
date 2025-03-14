@@ -1,11 +1,11 @@
 import mill._, scalalib._
 
 object ipwatcher extends RootModule with ScalaModule {
-  def scalaVersion = "3.5.0"
+  def scalaVersion = "3.6.4"
 
   override def ivyDeps = Agg(
-    ivy"com.monovore::decline:2.4.1",
-    ivy"com.monovore::decline-effect:2.4.1",
+    ivy"com.monovore::decline:2.5.0",
+    ivy"com.monovore::decline-effect:2.5.0",
     ivy"org.typelevel::cats-effect:3.5.4",
     ivy"co.fs2::fs2-core:3.11.0",
     ivy"co.fs2::fs2-io:3.11.0",
