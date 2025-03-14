@@ -38,7 +38,7 @@ object UPNP:
 
   def upnpService[F[_]: Async: Logger]: Resource[F, UpnpService] = Resource(
     Async[F].blocking:
-      val upnpService = UpnpServiceImpl(DefaultUpnpServiceConfiguration())
+      val upnpService = UpnpServiceImpl(DefaultUpnpServiceConfiguration(0, 5000))
       upnpService.activate(new Config {
         def annotationType(): Class[? <: Annotation] = classOf[Config]
         def initialSearchEnabled(): Boolean = false

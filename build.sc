@@ -1,6 +1,6 @@
 import mill._, scalalib._
 
-object ipwatcher extends RootModule with ScalaModule {
+object `package` extends RootModule with ScalaModule {
   def scalaVersion = "3.6.4"
 
   override def ivyDeps = Agg(
@@ -18,7 +18,10 @@ object ipwatcher extends RootModule with ScalaModule {
     ivy"org.eclipse.jetty:jetty-servlet:9.4.53.v20231009",
     ivy"org.typelevel::log4cats-core:2.7.0",
     ivy"org.typelevel::log4cats-slf4j:2.7.0",
-    ivy"com.softwaremill.sttp.client4::fs2:4.0.0-M17"
+    ivy"com.softwaremill.sttp.client4::fs2:4.0.0-M17",
+    ivy"io.circe::circe-core:0.14.10",
+    ivy"io.circe::circe-generic:0.14.10",
+    ivy"io.circe::circe-parser:0.14.10"
   )
 
   override def scalacOptions = Seq("-deprecation", "-feature", "-new-syntax", "-unchecked", "-Xkind-projector:underscores")

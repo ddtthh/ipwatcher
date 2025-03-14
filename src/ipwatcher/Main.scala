@@ -3,6 +3,8 @@ package ipwatcher
 import cats.effect.*
 import cats.effect.implicits.*
 import cats.implicits.*
+import io.circe.*
+import io.circe.parser.*
 import fs2.*
 
 import com.monovore.decline.*
@@ -66,26 +68,48 @@ object Main extends CommandIOApp(
     def ip6Only: Boolean
     def group: Option[String]
     def info: String
-    def update[F[_]: Async: Logger](config: Config, backend: WebSocketStreamBackend[F, Fs2Streams[F]], ip6: String, ip4: Option[String]): F[Unit]
+    def update[F[_]: Async: Logger](config: Config, backend: WebSocketStreamBackend[F, Fs2Streams[F]], ip6: (String, Boolean), ip4: Option[(String, Boolean)]): F[Unit]
 
   final case class CloudflareDyndnsService(
       token: String,
       zone: String,
       record: String,
-      ip6: Boolean
+      setIp6: Boolean
   ) extends DyndnsService:
-    def ip6Only: Boolean = ip6
-    def info: String = s"cloudflare: zone: $zone, record: $record"
+    def ip6Only: Boolean = setIp6
+    def info: String = s"cloudflare: zone: $zone, record: $record, ${if setIp6 then "ip6" else "ip4"}"
     def group: Option[String] = None
-    def update[F[_]: Async: Logger](config: Config, backend: WebSocketStreamBackend[F, Fs2Streams[F]], ip6: String, ip4: Option[String]): F[Unit] =
-      ???
+    def update[F[_]: Async: Logger](config: Config, backend: WebSocketStreamBackend[F, Fs2Streams[F]], ip6: (String, Boolean), ip4: Option[(String, Boolean)]): F[Unit] =
+      (if setIp6 then Some(ip6) else ip4).map: (ip, changed) =>
+        if changed then
+          basicRequest.auth.bearer(token).patch(uri"https://api.cloudflare.com/client/v4/zones/$zone/dns_records/$record").body(
+            Json.obj(
+              "content" -> Json.fromString(ip)
+            ).toString
+          ).send(backend).flatMap: response =>
+            response.body match
+              case Right(message) =>
+                parse(message) match
+                  case Right(json) =>
+                    json.hcursor.downField("success").as[Boolean] match
+                      case Right(true) => Logger[F].info(s"update succeeded for $info with ip: $ip")
+                      case Right(false) =>
+                        json.hcursor.downField("errors").as[List[String]] match
+                          case Right(errors) => Async[F].raiseError(ApplicationException(s"Request failed for $info with errors: ${errors.mkString(", ")}"))
+                          case Left(_)       => Async[F].raiseError(ApplicationException(s"Request failed for $info with illegal response."))
+                      case Left(value) => Async[F].raiseError(ApplicationException(s"Request failed for $info with illegal response."))
+                  case Left(_) => Async[F].raiseError(ApplicationException(s"Request failed for $info with illegal response."))
+              case Left(_) => Async[F].raiseError(ApplicationException(s"Request failed for $info with illegal response."))
+        else
+          Logger[F].info(s"update for ip6 has already been send for $info with ip6: $ip6")
+      .getOrElse(Async[F].unit)
     end update
   end CloudflareDyndnsService
   object CloudflareDyndnsService:
     val authorizationToken = Opts.option[String]("token", help = "authorization token")
     val zoneId = Opts.option[String]("zone", help = "zone id")
     val dnsRecordId = Opts.option[String]("record", help = "dns record id")
-    val ip6 = Opts.flag("ip6", help = "use ip6 address, uses ip4 address otherwise").orTrue
+    val ip6 = Opts.flag("ip6", help = "use ip6 address, uses ip4 address otherwise").orFalse
     val command = Opts.subcommand("cloudflare", "updates via cloudflare dns api PATCH requests. ", false)(
       (authorizationToken, zoneId, dnsRecordId, ip6).mapN(CloudflareDyndnsService.apply)
     )
@@ -98,19 +122,22 @@ object Main extends CommandIOApp(
   ) extends DyndnsService:
     def ip6Only: Boolean = uris.isLeft
     def info: String = s"uri: ${uris.toEither.getOrLeft}, user: ${authorization.map(_._1).getOrElse("n/a")}"
-    def update[F[_]: Async: Logger](config: Config, backend: WebSocketStreamBackend[F, Fs2Streams[F]], ip6: String, ip4: Option[String]): F[Unit] =
+    def update[F[_]: Async: Logger](config: Config, backend: WebSocketStreamBackend[F, Fs2Streams[F]], ip6: (String, Boolean), ip4: Option[(String, Boolean)]): F[Unit] =
       val partialRequest = authorization.map: (user, password) =>
         basicRequest.auth.basic(user, password)
       .getOrElse(basicRequest)
       def doIp6Only(uriIp6Only: URI) =
-        val uri = Uri.unsafeParse(uriIp6Only.toString().replace("(IP6)", ip6))
-        val request = partialRequest.get(uri)
-        request.send(backend).flatMap: response =>
-          response.body match
-            case Right(_)  => Logger[F].info(s"update for ip6 succeeded for $info with ip6: $ip6")
-            case Left(msg) => Async[F].raiseError(ApplicationException(s"Request failed for uri $uri with $msg"))
+        if ip6._2 then
+          val uri = Uri.unsafeParse(uriIp6Only.toString().replace("(IP6)", ip6._1))
+          val request = partialRequest.get(uri)
+          request.send(backend).flatMap: response =>
+            response.body match
+              case Right(_)  => Logger[F].info(s"update for ip6 succeeded for $info with ip6: $ip6")
+              case Left(msg) => Async[F].raiseError(ApplicationException(s"Request failed for uri $uri with $msg"))
+        else
+          Logger[F].info(s"update for ip6 has already been send for $info with ip6: $ip6")
       def doBoth(uriBoth: URI, ip4: String) =
-        val uri = Uri.unsafeParse(uriBoth.toString().replace("(IP4)", ip4).replace("(IP6)", ip6))
+        val uri = Uri.unsafeParse(uriBoth.toString().replace("(IP4)", ip4).replace("(IP6)", ip6._1))
         val request = partialRequest.get(uri)
         request.send(backend).flatMap: response =>
           response.body match
@@ -120,12 +147,12 @@ object Main extends CommandIOApp(
         case Ior.Right(uriBoth) =>
           ip4 match
             case None      => Logger[F].warn(s"update ignored as no ip4 is available for $info with ip6: $ip6")
-            case Some(ip4) => doBoth(uriBoth, ip4)
+            case Some(ip4) => doBoth(uriBoth, ip4._1)
         case Ior.Left(uriIp6only) => doIp6Only(uriIp6only)
         case Ior.Both(uriIp6only, uriBoth) =>
           ip4 match
             case None      => doIp6Only(uriIp6only)
-            case Some(ip4) => doBoth(uriBoth, ip4)
+            case Some(ip4) => doBoth(uriBoth, ip4._1)
       Stream.retry(
         doSend.onError:
           case ApplicationException(msg) =>
@@ -273,7 +300,7 @@ object Main extends CommandIOApp(
                                Async[F].sleep(DurationConverters.toScala(delay))
                            else
                              Async[F].unit
-                          ) >> dyndnsService.update(config, backend, ip6, ip4)
+                          ) >> dyndnsService.update(config, backend, (ip6, !previousIp.exists(_._1 == ip6)), ip4.map(_ -> !previousIp.exists(_._2.contains(ip4))))
                       ) >> previousIps(index).set(Some((ip6, ip4)))).guarantee:
                         Async[F].realTimeInstant.flatMap: now =>
                           terminatedAt(index).set(Some(now))
