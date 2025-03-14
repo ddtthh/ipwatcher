@@ -72,8 +72,9 @@ object Main extends CommandIOApp(
       token: String,
       zone: String,
       record: String,
-      ip6Only: Boolean
+      ip6: Boolean
   ) extends DyndnsService:
+    def ip6Only: Boolean = ip6
     def info: String = s"cloudflare: zone: $zone, record: $record"
     def group: Option[String] = None
     def update[F[_]: Async: Logger](config: Config, backend: WebSocketStreamBackend[F, Fs2Streams[F]], ip6: String, ip4: Option[String]): F[Unit] =
@@ -84,9 +85,9 @@ object Main extends CommandIOApp(
     val authorizationToken = Opts.option[String]("token", help = "authorization token")
     val zoneId = Opts.option[String]("zone", help = "zone id")
     val dnsRecordId = Opts.option[String]("record", help = "dns record id")
-    val ip6only = Opts.flag("ip6only", help = "update only ip6 address").orFalse
+    val ip6 = Opts.flag("ip6", help = "use ip6 address, uses ip4 address otherwise").orTrue
     val command = Opts.subcommand("cloudflare", "updates via cloudflare dns api PATCH requests. ", false)(
-      (authorizationToken, zoneId, dnsRecordId, ip6only).mapN(CloudflareDyndnsService.apply)
+      (authorizationToken, zoneId, dnsRecordId, ip6).mapN(CloudflareDyndnsService.apply)
     )
   end CloudflareDyndnsService
 
